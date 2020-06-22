@@ -37,6 +37,7 @@ set(PYBIND11_TEST_FILES
   test_copy_move.cpp
   test_docstring_options.cpp
   test_eigen.cpp
+  test_eigen_tensor.cpp
   test_enum.cpp
   test_eval.cpp
   test_exceptions.cpp
@@ -188,6 +189,10 @@ foreach(target ${test_targets})
   if(EIGEN3_FOUND)
     if (PYBIND11_EIGEN_VIA_TARGET)
       target_link_libraries(${target} PRIVATE Eigen3::Eigen)
+      get_target_property(Eigen3_INCLUDE_DIRS Eigen3::Eigen INTERFACE_INCLUDE_DIRECTORIES)
+      set(eigen_unsupported_include_dir "${Eigen3_INCLUDE_DIRS}/unsupported")
+      message(WARNING "eige3 unsupported: ${eigen_unsupported_include_dir}")
+      target_include_directories(${target} PRIVATE ${eigen_unsupported_include_dir})
     else()
       target_include_directories(${target} PRIVATE ${EIGEN3_INCLUDE_DIR})
     endif()
