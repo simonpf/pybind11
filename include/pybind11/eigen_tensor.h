@@ -7,13 +7,15 @@
     All rights reserved. Use of this source code is governed by a
     BSD-style license that can be found in the LICENSE file.
 */
-
 #pragma once
 
 #include "numpy.h"
+#include <iostream>
 
 #if defined(__INTEL_COMPILER)
-#  pragma warning(disable: 1682) // implicit conversion of a 64-bit integral type to a smaller integral type (potential portability problem)
+// implicit conversion of a 64-bit integral type to a smaller integral type
+// (potential portability problem)
+#  pragma warning(disable: 1682)
 #elif defined(__GNUG__) || defined(__clang__)
 #  pragma GCC diagnostic push
 #  pragma GCC diagnostic ignored "-Wconversion"
@@ -39,7 +41,10 @@
 
 NAMESPACE_BEGIN(PYBIND11_NAMESPACE)
 
-// Provide a convenience alias for easier pass-by-ref usage with fully dynamic strides:
+////////////////////////////////////////////////////////////////////////////////
+// Helper types and aliases
+////////////////////////////////////////////////////////////////////////////////
+
 using EigenDStride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
 using EigenIndex = Eigen::Index;
 template <typename MatrixType> using EigenDRef = Eigen::Ref<MatrixType, 0, EigenDStride>;
@@ -90,12 +95,19 @@ private:
 
 template <size_t N, size_t i = 0>
     struct tensor_dimensions {
-        static constexpr auto text = _({static_cast<char>('n' + i)}) + _(", ") + tensor_dimensions<N-1, i + 1>::text;
+        static constexpr char c[] = {'m' + i, '\0'};
+        static constexpr auto text = _(c) + _(", ") + tensor_dimensions<N-1, i + 1>::text;
     };
 
 template <size_t i>
+struct tensor_dimensions<1, i> {
+    static constexpr char c[] = {'m' + i, '\0'};
+    static constexpr auto text = _(c);
+};
+
+template <size_t i>
 struct tensor_dimensions<0, i> {
-    static constexpr auto text = _({static_cast<char>('n' + i)});
+    static constexpr auto text = _("");
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -104,9 +116,10 @@ struct tensor_dimensions<0, i> {
 
 
 // Helper struct for extracting information from an Eigen type
-template <typename Type_> struct EigenProps {
+template <typename Type_> struct EigenTensorProps {
     using Type = Type_;
     using Scalar = typename Type::Scalar;
+    using Index = typename Type::Index;
     //using StrideType = typename eigen_extract_stride<Type>::type;
     static constexpr EigenIndex dimensions = Type::NumIndices;
     static constexpr bool row_major = Type::Layout == Eigen::RowMajor;
@@ -155,7 +168,7 @@ template <typename props>
 handle eigen_array_cast(typename props::Type const &src, handle base = handle(),
                         bool writeable = true) {
   constexpr ssize_t elem_size = sizeof(typename props::Scalar);
-  array a{src.Dimensions, src.data(), base};
+  array a{src.dimensions(), src.data(), base};
 
   //if (!writeable)
   //  array_proxy(a.ptr())->flags &= ~detail::npy_api::NPY_ARRAY_WRITEABLE_;
@@ -202,21 +215,23 @@ struct type_caster<Type, enable_if_t<is_eigen_tensor<Type>::value>> {
         if (!buf)
             return false;
 
-        auto dims = buf.ndim();
-        if (dims < 1 || dims > 2)
-            return false;
-
         auto fits = props::conformable(buf);
-        if (!fits)
+        if (!fits) {
             return false;
+        }
 
         // Allocate the new type, then build a numpy reference into it
-        value = Type(fits.rows, fits.cols);
-        auto ref = reinterpret_steal<array>(eigen_ref_array<props>(value));
-        if (dims == 1) ref = ref.squeeze();
-        else if (ref.ndim() == 1) buf = buf.squeeze();
+        value = Type{};
+        std::array<typename Type::Index, props::dimensions> dims{};
+        for (size_t i = 0; i < props::dimensions; ++i) {
+            dims[i] = buf.shape(i);
+        }
+        value.resize(dims);
 
+        auto ref = reinterpret_steal<array>(eigen_ref_array<props>(value));
         int result = detail::npy_api::get().PyArray_CopyInto_(ref.ptr(), buf.ptr());
+
+        std::cout << "result: " << result << std::endl;
 
         if (result < 0) { // Copy failed!
             PyErr_Clear();

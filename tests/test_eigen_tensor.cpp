@@ -19,10 +19,10 @@
 #include <Eigen/Cholesky>
 
 using MatrixXdR = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-using TensordR = Eigen::Tensor<double, Eigen::Dynamic, 3>;
+using TensordR = Eigen::Tensor<double, 3>;
 
 
-TEST_SUBMODULE(eigen, m) {
+TEST_SUBMODULE(eigen_tensor, m) {
 //    // various tests
       m.def("double", [](const TensordR &x) -> TensordR { return 2.0f * x; });
 
