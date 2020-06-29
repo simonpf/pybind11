@@ -45,12 +45,11 @@ NAMESPACE_BEGIN(PYBIND11_NAMESPACE)
 // Helper types and aliases
 ////////////////////////////////////////////////////////////////////////////////
 
-using EigenDStride = Eigen::Stride<Eigen::Dynamic, Eigen::Dynamic>;
-using EigenIndex = Eigen::Index;
-template <typename MatrixType> using EigenDRef = Eigen::Ref<MatrixType, 0, EigenDStride>;
-template <typename MatrixType> using EigenDMap = Eigen::Map<MatrixType, 0, EigenDStride>;
-
 NAMESPACE_BEGIN(detail)
+
+//
+// is_tensor
+//
 
 struct is_tensor_impl {
     template <typename Scalar, int NumIndices, int Options, typename IndexType>
@@ -61,6 +60,31 @@ struct is_tensor_impl {
 template <typename T>
 using is_eigen_tensor = decltype(is_tensor_impl::check((intrinsic_t<T>*)nullptr));
 
+//
+// is_tensor_map
+//
+
+struct is_tensor_map_impl {
+    template <typename PlainObjectType, int Options, template <typename> typename MakePointer>
+        static std::true_type check(Eigen::TensorMap<PlainObjectType, Options, MakePointer> *);
+    static std::false_type check(...);
+};
+
+template <typename T>
+using is_eigen_tensor_map = decltype(is_tensor_map_impl::check((intrinsic_t<T>*)nullptr));
+
+//
+// is_tensor_ref
+//
+
+struct is_tensor_ref_impl {
+    template <typename PlainObjectType>
+        static std::true_type check(Eigen::TensorRef<PlainObjectType> *);
+    static std::false_type check(...);
+};
+
+template <typename T>
+using is_eigen_tensor_ref = decltype(is_tensor_ref_impl::check((intrinsic_t<T>*)nullptr));
 
 ////////////////////////////////////////////////////////////////////////////////
 // Tensor conformable
@@ -69,29 +93,24 @@ using is_eigen_tensor = decltype(is_tensor_impl::check((intrinsic_t<T>*)nullptr)
 /* Captures numpy/eigen conformability status */
 
 template <bool EigenRowMajor> struct EigenTensorConformable {
-    std::vector<size_t> dimensions;
+    /** Can numpy type converted to Eigen type? */
     bool conformable = false;
-    EigenIndex dims = 0;
+    /** Size of the tensor along each dimension. */
+    std::vector<size_t> dimensions;
+    /** The rank of the tensor. */
+    size_t rank = 0;
 
     EigenTensorConformable(bool fits = false) : conformable{fits} {}
-    // Matrix type:
     EigenTensorConformable(std::vector<size_t> dimensions_)
-            :
-    conformable{true}, dimensions(dimensions_) {
-    }
-
-    template <typename props> bool stride_compatible() const {
-        // To have compatible strides, we need (on both dimensions) one of fully dynamic strides,
-        // matching strides, or a dimension size of 1 (in which case the stride value is irrelevant)
-        return true;
-    }
+        : conformable{true}, dimensions(dimensions_) {}
 
     operator bool() const { return conformable; }
 
-private:
-
-
 };
+
+////////////////////////////////////////////////////////////////////////////////
+// Eigen Tensor traits
+////////////////////////////////////////////////////////////////////////////////
 
 template <size_t N, size_t i = 0>
     struct tensor_dimensions {
@@ -110,97 +129,158 @@ struct tensor_dimensions<0, i> {
     static constexpr auto text = _("");
 };
 
-////////////////////////////////////////////////////////////////////////////////
-// EigenProps
-////////////////////////////////////////////////////////////////////////////////
+template<typename Tensor>
+struct get_options {
+    static constexpr int value = Tensor::Options;
+};
 
+template<typename Tensor>
+struct get_options<Eigen::TensorRef<Tensor>> {
+    static constexpr int value = Tensor::Options;
+};
 
-// Helper struct for extracting information from an Eigen type
+/** Properties of Eigen Tensor types.
+ *
+ * Helper struct to extract and combine information for Eigen tensor types.
+ */
 template <typename Type_> struct EigenTensorProps {
+    /** The Eigen tensor type. */
     using Type = Type_;
+    /** The Scalar used for its coefficients */
     using Scalar = typename Type::Scalar;
+    /** Integer type used for indices */
     using Index = typename Type::Index;
-    //using StrideType = typename eigen_extract_stride<Type>::type;
-    static constexpr EigenIndex dimensions = Type::NumIndices;
-    static constexpr bool row_major = Type::Layout == Eigen::RowMajor;
+    /** Corresponding type that manages its own data. */
+    using PlainObjectType = Eigen::Tensor<Scalar, Type::NumIndices, get_options<Type>::value, typename Type::Index>;
+    /** Corresponding map type. */
+    using EigenMapType = Eigen::TensorMap<PlainObjectType, get_options<Type>::value>;
+
+    /** The rank of the tensor */
+    static constexpr Eigen::Index rank = Type::NumIndices;
+    /** Is data in row-major storage format? */
+    static constexpr bool row_major = static_cast<int>(Type::Layout) == Eigen::RowMajor;
+    /** Is the tensor writable? */
+    static constexpr bool writable = !std::is_const<typename Type::CoeffReturnType>::value;
+    /** Are we trying to avoid copying ? */
+    static constexpr bool avoid_copy = is_eigen_tensor_map<Type>() || is_eigen_tensor_ref<Type>();
+    /** Do we require numpy array to be writable?
+     *
+     * This is the case when we are trying to avoid copying but still want mutable
+     * access.
+     */
+    static constexpr bool needs_writable = writable && avoid_copy;
+
+    using NumpyArrayType = array_t<Scalar, array::forcecast | (row_major ? array::c_style : array::f_style)>;
 
 
     // Takes an input array and determines whether we can make it fit into the Eigen type.  If
     // the array is a vector, we attempt to fit it into either an Eigen 1xN or Nx1 vector
     // (preferring the latter if it will fit in either, i.e. for a fully dynamic matrix type).
-    static EigenTensorConformable<row_major> conformable(const array &a) {
-        const auto dims = a.ndim();
-        if (dims < 2) {
-            return false;
-        }
+    static bool conformable(const array &arr) {
+      if (!arr) { 
+          return false;
+      }
 
-        std::vector<size_t> dimensions{};
-        for (size_t i = 0; i < dims; ++i) {
-            dimensions.push_back(a.shape(i));
-        }
-        return dimensions;
+      const auto dims = arr.ndim();
+
+      // If we are allowed to copy, all we care about is the tensor rank.
+      if (dims != rank) {
+          return false;
+      }
+      return true;
     }
 
-    //static constexpr bool show_writeable = is_eigen_dense_map<Type>::value && is_eigen_mutable_map<Type>::value;
-    //static constexpr bool show_order = is_eigen_dense_map<Type>::value;
-    //static constexpr bool show_c_contiguous = show_order && requires_row_major;
-    //static constexpr bool show_f_contiguous = !show_c_contiguous && show_order && requires_col_major;
+    // Takes an input array and determines whether we can make it fit into the Eigen type.  If
+    // the array is a vector, we attempt to fit it into either an Eigen 1xN or Nx1 vector
+    // (preferring the latter if it will fit in either, i.e. for a fully dynamic matrix type).
+    static bool needs_copy(const array &arr) {
+      if (!isinstance<array_t<Scalar>>(arr)) {
+        return true;
+      }
 
+      const auto dims = arr.ndim();
+      std::vector<long int> expected_strides{dims};
+      size_t cs = sizeof(Scalar);
+      expected_strides[0] = cs;
+      for (long int i = 0; i < dims - 1; ++i) {
+        cs *= arr.shape(row_major ? dims - i - 1 : i);
+        expected_strides[i + 1] = cs;
+      }
+      for (long int i = 0; i < dims; ++i) {
+        if (arr.strides(i) != expected_strides[dims - i - 1]) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    /** Descriptor for Python-side output. */
     static constexpr auto descriptor =
         _("numpy.ndarray[") + npy_format_descriptor<Scalar>::name +
-        _("[")  + tensor_dimensions<dimensions>::text +
+        _("[")  + tensor_dimensions<rank>::text +
         _("]") +
-        // For a reference type (e.g. Ref<MatrixXd>) we have other constraints that might need to be
-        // satisfied: writeable=True (for a mutable reference), and, depending on the map's stride
-        // options, possibly f_contiguous or c_contiguous.  We include them in the descriptor output
-        // to provide some hint as to why a TypeError is occurring (otherwise it can be confusing to
-        // see that a function accepts a 'numpy.ndarray[float64[3,2]]' and an error message that you
-        // *gave* a numpy.ndarray of the right type and dimensions.
-        //_<show_writeable>(", flags.writeable", "") +
-        //_<show_c_contiguous>(", flags.c_contiguous", "") +
-        //_<show_f_contiguous>(", flags.f_contiguous", "") +
+        _<needs_writable>(", flags.writable", "") +
+        _<avoid_copy && row_major>(", flags.c_contiguous", "") +
+        _<avoid_copy && !row_major>(", flags.f_contiguous", "") +
         _("]");
 };
 
-// Casts an Eigen type to numpy array.  If given a base, the numpy array references the src data,
-// otherwise it'll make a copy.  writeable lets you turn off the writeable flag for the array.
-template <typename props>
-handle eigen_array_cast(typename props::Type const &src, handle base = handle(),
-                        bool writeable = true) {
-  constexpr ssize_t elem_size = sizeof(typename props::Scalar);
-  array a{src.dimensions(), src.data(), base};
+////////////////////////////////////////////////////////////////////////////////
+// Converting Eigen to numpy
+////////////////////////////////////////////////////////////////////////////////
 
-  //if (!writeable)
-  //  array_proxy(a.ptr())->flags &= ~detail::npy_api::NPY_ARRAY_WRITEABLE_;
+/** Cast Eigen Tensor to numpy array.
+ *
+ * Returns numpy array object referencing the data of the given Eigen tensor.
+ *
+ * @param src The Eigen tensor
+ * @param base Python object to tie the lifetime of the newly created array.
+ * @param Value of the writable flag of the newly created array.
+ * @return Numpy array object handle that references the data of the
+ *         given Eigen tensor.
+ */
+template <typename props>
+handle tensor_array_cast(typename props::Type const &src,
+                         handle base = handle(),
+                         bool writable = props::writable) {
+  typename props::NumpyArrayType a{src.dimensions(), src.data(), base};
+
+  if (!writable) {
+      std::cout << "not writeable!" << std::endl;
+    array_proxy(a.ptr())->flags &= !detail::npy_api::NPY_ARRAY_WRITEABLE_;
+  }
 
   return a.release();
-}
-
-// Takes an lvalue ref to some Eigen type and a (python) base object, creating a numpy array that
-// reference the Eigen object's data with `base` as the python-registered base class (if omitted,
-// the base will be set to None, and lifetime management is up to the caller).  The numpy array is
-// non-writeable if the given type is const.
-template <typename props, typename Type>
-handle eigen_ref_array(Type &src, handle parent = none()) {
-    // none here is to get past array's should-we-copy detection, which currently always
-    // copies when there is no base.  Setting the base to None should be harmless.
-    return eigen_array_cast<props>(src, parent, !std::is_const<Type>::value);
 }
 
 // Takes a pointer to some dense, plain Eigen type, builds a capsule around it, then returns a numpy
 // array that references the encapsulated data with a python-side reference to the capsule to tie
 // its destruction to that of any dependent python objects.  Const-ness is determined by whether or
 // not the Type of the pointer given is const.
-template <typename props, typename Type>
-handle eigen_encapsulate(Type *src) {
-    capsule base(src, [](void *o) { delete static_cast<Type *>(o); });
-    return eigen_ref_array<props>(*src, base);
+
+/** Encapsule Eigen tensor.
+ *
+ * Creates a capsule around given Eigen  to manage its life time and creates
+ * a numpy array pointing to the tensor's data. Lifetime of the capsule is tied
+ * to the newly created numpy array.
+ *
+ * @param src Pointer to Eigen tensor to return to Python.
+ * @return A numpy array pointing to the data of the tensor, which is tied to the
+ *         capsule managing the tensors lifetime.
+ */
+template <typename props,
+          typename Type>
+handle tensor_encapsulate(Type *src) {
+  capsule base(src, [](void *o) { delete static_cast<Type *>(o); });
+  return tensor_array_cast<props>(*src, base);
 }
 
-// Type caster for regular, dense matrix types (e.g. MatrixXd), but not maps/refs/etc. of dense
-// types.
+////////////////////////////////////////////////////////////////////////////////
+// Converting Eigen to numpy
+////////////////////////////////////////////////////////////////////////////////
+
 template<typename Type>
-struct type_caster<Type, enable_if_t<is_eigen_tensor<Type>::value>> {
+struct tensor_type_caster {
     using Scalar = typename Type::Scalar;
     using props = EigenTensorProps<Type>;
 
@@ -209,11 +289,8 @@ struct type_caster<Type, enable_if_t<is_eigen_tensor<Type>::value>> {
         if (!convert && !isinstance<array_t<Scalar>>(src))
             return false;
 
-        // Coerce into an array, but don't do type conversion yet; the copy below handles it.
         auto buf = array::ensure(src);
-
-        if (!buf)
-            return false;
+        if (!buf) return false;
 
         auto fits = props::conformable(buf);
         if (!fits) {
@@ -222,16 +299,14 @@ struct type_caster<Type, enable_if_t<is_eigen_tensor<Type>::value>> {
 
         // Allocate the new type, then build a numpy reference into it
         value = Type{};
-        std::array<typename Type::Index, props::dimensions> dims{};
-        for (size_t i = 0; i < props::dimensions; ++i) {
+        std::array<typename Type::Index, props::rank> dims{};
+        for (size_t i = 0; i < props::rank; ++i) {
             dims[i] = buf.shape(i);
         }
         value.resize(dims);
 
-        auto ref = reinterpret_steal<array>(eigen_ref_array<props>(value));
+        auto ref = reinterpret_steal<array>(tensor_array_cast<props>(value));
         int result = detail::npy_api::get().PyArray_CopyInto_(ref.ptr(), buf.ptr());
-
-        std::cout << "result: " << result << std::endl;
 
         if (result < 0) { // Copy failed!
             PyErr_Clear();
@@ -249,16 +324,16 @@ private:
         switch (policy) {
             case return_value_policy::take_ownership:
             case return_value_policy::automatic:
-                return eigen_encapsulate<props>(src);
+                return tensor_encapsulate<props>(src);
             case return_value_policy::move:
-                return eigen_encapsulate<props>(new CType(std::move(*src)));
+                return tensor_encapsulate<props>(new CType(std::move(*src)));
             case return_value_policy::copy:
-                return eigen_array_cast<props>(*src);
+                return tensor_array_cast<props>(*src);
             case return_value_policy::reference:
             case return_value_policy::automatic_reference:
-                return eigen_ref_array<props>(*src);
+                return tensor_array_cast<props>(*src);
             case return_value_policy::reference_internal:
-                return eigen_ref_array<props>(*src, parent);
+                return tensor_array_cast<props>(*src, parent);
             default:
                 throw cast_error("unhandled return_value_policy: should not happen!");
         };
@@ -304,6 +379,74 @@ public:
 
 private:
     Type value;
+};
+
+
+
+template<size_t rank>
+std::array<Eigen::Index, rank> get_dimensions(array a) {
+    std::array<Eigen::Index, rank> result{};
+    for (size_t i = 0; i < rank; ++i) {
+        result[i] = a.shape(i);
+    }
+    return result;
+}
+
+template <typename Type>
+struct type_caster<Type, enable_if_t<is_eigen_tensor<Type>::value>>
+    : public tensor_type_caster<Type> {};
+
+template <typename Type>
+struct type_caster<Type, enable_if_t<is_eigen_tensor_map<Type>::value || is_eigen_tensor_ref<Type>::value>>
+    : public tensor_type_caster<Type> {
+
+    using Base = tensor_type_caster<Type>;
+    using props = typename Base::props;
+    using MapType = typename props::EigenMapType;
+    using Array = typename props::NumpyArrayType;
+
+public:
+
+    bool load(handle src, bool convert) {
+
+        // No need to carry on if array isn't even conform.
+        auto buf = array::ensure(src);
+        if (!buf) return false;
+        auto fits = props::conformable(buf);
+        if (!fits) {
+            return false;
+        }
+
+
+        bool need_copy = props::needs_copy(buf);
+        if (need_copy) {
+            if (!convert || props::avoid_copy) {
+                return false;
+            }
+            copy_or_ref = Array::ensure(src);
+            loader_life_support::add_patient(copy_or_ref);
+        } else {
+            copy_or_ref = Array::ensure(buf);
+            if (!copy_or_ref) {
+                return false;
+            }
+        }
+
+        map.reset(new MapType(copy_or_ref.mutable_data(), get_dimensions<props::rank>(copy_or_ref)));
+        value.reset(new Type(*map));
+        return true;
+    }
+
+    operator Type*() { return value.get(); }
+    operator Type&() { return *value.get(); }
+    operator Type&&() && { return std::move(*value); }
+
+private:
+
+    Array copy_or_ref;
+    std::unique_ptr<MapType> map;
+    std::unique_ptr<Type> value;
+
 };
 
 NAMESPACE_END(detail)

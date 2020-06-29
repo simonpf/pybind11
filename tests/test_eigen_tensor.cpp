@@ -20,89 +20,120 @@
 
 using MatrixXdR = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
 using TensordR = Eigen::Tensor<double, 3>;
+using Tensor3R = Eigen::Tensor<double, 3, Eigen::RowMajor>;
+using Tensor3C = Eigen::Tensor<double, 3, Eigen::ColMajor>;
+using Tensor4R = Eigen::Tensor<double, 4, Eigen::RowMajor>;
+using Tensor4C = Eigen::Tensor<double, 4, Eigen::ColMajor>;
+
+////////////////////////////////////////////////////////////////////////////////
+// Generic test utilities
+////////////////////////////////////////////////////////////////////////////////
+
+template<typename Scalar, int rank, int storage_type>
+struct TestFunctions {
+
+    using TensorType = Eigen::Tensor<Scalar, rank, storage_type>;
+    using RefType = Eigen::TensorRef<TensorType>;
+    using ConstRefType = Eigen::TensorRef<const TensorType>;
+    using MapType = Eigen::TensorMap<TensorType, storage_type>;
+
+    static constexpr bool c_contiguous = storage_type == Eigen::RowMajor;
+
+    static TensorType *x;
+
+    struct Generator {
+        Scalar operator()(const std::array<Eigen::DenseIndex, rank> &coordinates) const {
+            Scalar value = 0.0;
+            for (size_t i = 0; i < rank; ++i ) {
+                value += static_cast<Scalar>(coordinates[i]) * static_cast<Scalar>(pow(10, i));
+            }
+            return value;
+        }
+    };
+
+    static void reset_ref() {
+        std::array<int, rank> sizes;
+        for (size_t i = 0; i < rank; ++i) {
+            sizes[i] = 3 + rand() % 2;
+        }
+        TensorType t{};
+        t.resize(sizes);
+        x = new TensorType(t.generate(Generator()));
+    }
+
+    // Returns static tensor.
+    static TensorType get_tensor() {
+        reset_ref();
+        return *x;
+    }
+
+    static RefType get_tensor_ref() {
+        reset_ref();
+        return *x;
+    }
+
+    static ConstRefType get_tensor_const_ref() {
+        reset_ref();
+        return *x;
+    }
+
+    static Scalar get_element(std::array<Eigen::Index, rank> indices) {
+        return x->coeff(indices);
+    }
+
+    static Scalar add_element(RefType r, std::array<Eigen::Index, rank> indices, Scalar s) {
+        return r.coeffRef(indices) += s;
+    }
+
+    static Scalar add_element(TensorType t, std::array<Eigen::Index, rank> indices, Scalar s) {
+        return t(indices) += s;
+    }
+
+    static TensorType mul(TensorType t, Scalar s) {
+        return s * t;
+    }
+
+    static RefType mul_ref(RefType t, Scalar s) {
+        TensorType ts(t.dimensions());
+        ts.setConstant(s);
+        t *= ts;
+        return t;
+    }
+
+};
+
+template<typename Scalar, int rank, int storage_type>
+Eigen::Tensor<Scalar, rank, storage_type> * TestFunctions<Scalar, rank, storage_type>::x = nullptr;
 
 
-TEST_SUBMODULE(eigen_tensor, m) {
-//    // various tests
-      m.def("double", [](const TensordR &x) -> TensordR { return 2.0f * x; });
+#define testmodule(N, S, R, M) \
+    using Test_ ## N = TestFunctions<S, R, M>;                                         \
+    using TensorType_ ## N = typename TestFunctions<S, R, M>::TensorType;              \
+    using RefType_ ## N = typename TestFunctions<S, R, M>::RefType;                    \
+    TEST_SUBMODULE(N, m) {                                                             \
+        m.attr("c_contiguous") = Test_## N::c_contiguous;                              \
+        m.def("get_tensor", Test_ ## N::get_tensor);                                   \
+        m.def("get_tensor_ref", Test_ ## N::get_tensor_ref);                           \
+        m.def("get_tensor_const_ref", Test_ ## N::get_tensor_const_ref);               \
+        m.def("get_element", Test_ ## N::get_element);                                 \
+        m.def("add_element", (S(*)(RefType_ ## N, std::array<Eigen::Index, R>, S)) &Test_ ## N::add_element); \
+        m.def("add_element", (S(*)(TensorType_ ## N, std::array<Eigen::Index, R>, S)) &Test_ ## N::add_element); \
+        m.def("mul", Test_ ## N::mul);                                                 \
+        m.def("mul", Test_ ## N::mul_ref);                                             \
+    }
 
-// Sets/resets a testing reference matrix to have values of 10*r + c, where r and c are the
-// (1-based) row/column number.
-//template <typename M> void reset_ref(M &x) {
-//    for (int i = 0; i < x.rows(); i++) for (int j = 0; j < x.cols(); j++)
-//        x(i, j) = 11 + 10*i + j;
-//}
+testmodule(eigen_tensor_3_f_r, float, 3, Eigen::RowMajor)
+testmodule(eigen_tensor_3_f_c, float, 3, Eigen::ColMajor)
+testmodule(eigen_tensor_4_f_r, float, 4, Eigen::RowMajor)
+testmodule(eigen_tensor_4_f_c, float, 4, Eigen::ColMajor)
+testmodule(eigen_tensor_5_f_r, float, 4, Eigen::RowMajor)
+testmodule(eigen_tensor_5_f_c, float, 4, Eigen::ColMajor)
+testmodule(eigen_tensor_3_d_r, double, 3, Eigen::RowMajor)
+testmodule(eigen_tensor_3_d_c, double, 3, Eigen::ColMajor)
+testmodule(eigen_tensor_3_i_r, int, 3, Eigen::RowMajor)
+testmodule(eigen_tensor_3_i_c, int, 3, Eigen::ColMajor)
 
-//// Returns a static, column-major matrix
-//Eigen::MatrixXd &get_cm() {
-//    static Eigen::MatrixXd *x;
-//    if (!x) {
-//        x = new Eigen::MatrixXd(3, 3);
-//        reset_ref(*x);
-//    }
-//    return *x;
-//}
-//// Likewise, but row-major
-//MatrixXdR &get_rm() {
-//    static MatrixXdR *x;
-//    if (!x) {
-//        x = new MatrixXdR(3, 3);
-//        reset_ref(*x);
-//    }
-//    return *x;
-//}
-//// Resets the values of the static matrices returned by get_cm()/get_rm()
-//void reset_refs() {
-//    reset_ref(get_cm());
-//    reset_ref(get_rm());
-//}
-//
-//// Returns element 2,1 from a matrix (used to test copy/nocopy)
-//double get_elem(Eigen::Ref<const Eigen::MatrixXd> m) { return m(2, 1); };
-//
-//
-//// Returns a matrix with 10*r + 100*c added to each matrix element (to help test that the matrix
-//// reference is referencing rows/columns correctly).
-//template <typename MatrixArgType> Eigen::MatrixXd adjust_matrix(MatrixArgType m) {
-//    Eigen::MatrixXd ret(m);
-//    for (int c = 0; c < m.cols(); c++) for (int r = 0; r < m.rows(); r++)
-//        ret(r, c) += 10*r + 100*c;
-//    return ret;
-//}
-//
-//struct CustomOperatorNew {
-//    CustomOperatorNew() = default;
-//
-//    Eigen::Matrix4d a = Eigen::Matrix4d::Zero();
-//    Eigen::Matrix4d b = Eigen::Matrix4d::Identity();
-//
-//    EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
-//};
-//
-//TEST_SUBMODULE(eigen, m) {
-//    using FixedMatrixR = Eigen::Matrix<float, 5, 6, Eigen::RowMajor>;
-//    using FixedMatrixC = Eigen::Matrix<float, 5, 6>;
-//    using DenseMatrixR = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-//    using DenseMatrixC = Eigen::Matrix<float, Eigen::Dynamic, Eigen::Dynamic>;
-//    using FourRowMatrixC = Eigen::Matrix<float, 4, Eigen::Dynamic>;
-//    using FourColMatrixC = Eigen::Matrix<float, Eigen::Dynamic, 4>;
-//    using FourRowMatrixR = Eigen::Matrix<float, 4, Eigen::Dynamic>;
-//    using FourColMatrixR = Eigen::Matrix<float, Eigen::Dynamic, 4>;
-//    using SparseMatrixR = Eigen::SparseMatrix<float, Eigen::RowMajor>;
-//    using SparseMatrixC = Eigen::SparseMatrix<float>;
-//
-//    m.attr("have_eigen") = true;
-//
-//    // various tests
-//    m.def("double_col", [](const Eigen::VectorXf &x) -> Eigen::VectorXf { return 2.0f * x; });
-//    m.def("double_row", [](const Eigen::RowVectorXf &x) -> Eigen::RowVectorXf { return 2.0f * x; });
-//    m.def("double_complex", [](const Eigen::VectorXcf &x) -> Eigen::VectorXcf { return 2.0f * x; });
-//    m.def("double_threec", [](py::EigenDRef<Eigen::Vector3f> x) { x *= 2; });
-//    m.def("double_threer", [](py::EigenDRef<Eigen::RowVector3f> x) { x *= 2; });
-//    m.def("double_mat_cm", [](Eigen::MatrixXf x) -> Eigen::MatrixXf { return 2.0f * x; });
-//    m.def("double_mat_rm", [](DenseMatrixR x) -> DenseMatrixR { return 2.0f * x; });
-//
-//    // test_eigen_ref_to_python
+//    // Test_eigen_ref_to_python
 //    // Different ways of passing via Eigen::Ref; the first and second are the Eigen-recommended
 //    m.def("cholesky1", [](Eigen::Ref<MatrixXdR> x) -> Eigen::MatrixXd { return x.llt().matrixL(); });
 //    m.def("cholesky2", [](const Eigen::Ref<const MatrixXdR> &x) -> Eigen::MatrixXd { return x.llt().matrixL(); });
@@ -330,4 +361,3 @@ TEST_SUBMODULE(eigen_tensor, m) {
 //        py::module::import("numpy").attr("ones")(10);
 //        return v[0](5);
 //    });
-}
