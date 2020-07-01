@@ -11,6 +11,7 @@ module_names = ["eigen_tensor_3_f_r",
                 "eigen_tensor_3_d_c",
                 "eigen_tensor_3_i_r",
                 "eigen_tensor_3_i_c"]
+
 test_modules = [getattr(pybind11_tests, n) for n in module_names]
 
 def get_ref(array):
@@ -35,7 +36,6 @@ def test_reference_tensor(module):
     x_ref = get_ref(x)
     assert(np.all(np.isclose(x, x_ref)))
     assert(x.flags["C_CONTIGUOUS"] == module.c_contiguous)
-    assert(x.flags["WRITEABLE"])
 
     dtype = x.dtype
     index = tuple([0, ] * len(x.shape))
@@ -54,7 +54,6 @@ def test_reference_tensor_ref(module):
    x_ref = get_ref(x)
    assert(np.all(np.isclose(x, x_ref)))
    assert(x.flags["C_CONTIGUOUS"] == module.c_contiguous)
-   assert(x.flags["WRITEABLE"])
 
    dtype = x.dtype
    index = [0, ] * len(x.shape)
@@ -73,5 +72,81 @@ def test_reference_tensor_const_ref(module):
    x_ref = get_ref(x)
    assert(np.all(np.isclose(x, x_ref)))
    assert(x.flags["C_CONTIGUOUS"] == module.c_contiguous)
-   print(x.flags["WRITEABLE"])
-   assert(not x.flags["WRITEABLE"])
+
+@pytest.mark.parametrize("module", test_modules)
+def test_reference_tensor_map(module):
+   """
+   This function checks that the returned TensorMap shares memory with the C++-side tensor
+   x and that setting a given element changes the value of the returned numpy array.
+   """
+   x = module.get_tensor_map()
+   x_ref = get_ref(x)
+   assert(np.all(np.isclose(x, x_ref)))
+   assert(x.flags["C_CONTIGUOUS"] == module.c_contiguous)
+
+   dtype = x.dtype
+   index = [0, ] * len(x.shape)
+   r = np.array(np.random.rand(), dtype=dtype)
+   x[index] = r
+   x0 = module.get_element(index)
+   assert(np.isclose(x0, r))
+
+@pytest.mark.parametrize("module", test_modules)
+def test_add_element_ref(module):
+   """
+   This function checks that the returned TensorMap shares memory with the C++-side tensor
+   x and that setting a given element changes the value of the returned numpy array.
+   """
+   dtype = module.get_tensor_map().dtype
+   order = "C" if module.c_contiguous else "F"
+   sizes = np.random.randint(1, 5, size=module.rank)
+   x = np.ones(tuple(sizes), order=order, dtype=dtype)
+   indices = (0, ) * module.rank
+   r = np.array(1.0, dtype=dtype)
+   module.add_element(x, list(indices), r)
+   assert(np.isclose(x[indices], r + np.array(1, dtype=dtype)))
+
+@pytest.mark.parametrize("module", test_modules)
+def test_add_element_copy(module):
+   """
+   This test ensures that the right overload is chosen when the provided
+   array does not match the expected tensor.
+   """
+   dtype = module.get_tensor_map().dtype
+   order = "F" if module.c_contiguous else "C"
+   sizes = np.random.randint(1, 5, size=module.rank)
+   x = np.ones(tuple(sizes), order=order, dtype=dtype)
+   indices = tuple(np.random.randint(1, 5, size=module.rank) % sizes)
+   r = np.array(np.random.randint(666), dtype=dtype)
+   module.add_element(x, list(indices), r)
+   assert(not np.isclose(x[indices], r + np.array(1, dtype=dtype)))
+
+@pytest.mark.parametrize("module", test_modules)
+def test_mul_ref(module):
+  """
+  This function checks that the returned TensorMap shares memory with the C++-side tensor
+  x and that setting a given element changes the value of the returned numpy array.
+  """
+  dtype = module.get_tensor_map().dtype
+  order = "C" if module.c_contiguous else "F"
+  sizes = np.random.randint(1, 5, size=module.rank)
+  x = np.ones(tuple(sizes), order=order, dtype=dtype)
+  indices = np.random.randint(1, 5, size=module.rank) % sizes
+  r = np.array(np.random.randint(666), dtype=dtype)
+  y = module.mul(x, r)
+  assert(np.all(np.isclose(x, y)))
+
+@pytest.mark.parametrize("module", test_modules)
+def test_mul_copy(module):
+  """
+  This function checks that the returned TensorMap shares memory with the C++-side tensor
+  x and that setting a given element changes the value of the returned numpy array.
+  """
+  dtype = module.get_tensor_map().dtype
+  order = "F" if module.c_contiguous else "C"
+  sizes = np.random.randint(1, 5, size=module.rank)
+  x = np.ones(tuple(sizes), order=order, dtype=dtype)
+  indices = (0, ) * module.rank
+  r = np.array(np.random.randint(666), dtype=dtype)
+  y = module.mul(x, r)
+  assert(np.all(np.isclose(y, r * x)))

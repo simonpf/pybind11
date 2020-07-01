@@ -72,6 +72,11 @@ struct TestFunctions {
         return *x;
     }
 
+    static RefType get_tensor_map() {
+        reset_ref();
+        return *x;
+    }
+
     static ConstRefType get_tensor_const_ref() {
         reset_ref();
         return *x;
@@ -81,22 +86,22 @@ struct TestFunctions {
         return x->coeff(indices);
     }
 
-    static Scalar add_element(RefType r, std::array<Eigen::Index, rank> indices, Scalar s) {
-        return r.coeffRef(indices) += s;
+    static void add_element(RefType r, std::array<Eigen::Index, rank> indices, Scalar s) {
+        r.coeffRef(indices) += s;
     }
 
-    static Scalar add_element(TensorType t, std::array<Eigen::Index, rank> indices, Scalar s) {
-        return t(indices) += s;
+    static void add_element(TensorType t, std::array<Eigen::Index, rank> indices, Scalar s) {
+        t.coeffRef(indices) += s;
     }
 
     static TensorType mul(TensorType t, Scalar s) {
         return s * t;
     }
 
-    static RefType mul_ref(RefType t, Scalar s) {
+    static RefType mul(RefType t, Scalar s) {
         TensorType ts(t.dimensions());
         ts.setConstant(s);
-        t *= ts;
+        //t *= ts;
         return t;
     }
 
@@ -110,24 +115,27 @@ Eigen::Tensor<Scalar, rank, storage_type> * TestFunctions<Scalar, rank, storage_
     using Test_ ## N = TestFunctions<S, R, M>;                                         \
     using TensorType_ ## N = typename TestFunctions<S, R, M>::TensorType;              \
     using RefType_ ## N = typename TestFunctions<S, R, M>::RefType;                    \
+    using MapType_ ## N = typename TestFunctions<S, R, M>::MapType;                    \
     TEST_SUBMODULE(N, m) {                                                             \
-        m.attr("c_contiguous") = Test_## N::c_contiguous;                              \
+        m.attr("c_contiguous") = M == Eigen::RowMajor;                                 \
+        m.attr("rank") = R;                                                            \
         m.def("get_tensor", Test_ ## N::get_tensor);                                   \
         m.def("get_tensor_ref", Test_ ## N::get_tensor_ref);                           \
         m.def("get_tensor_const_ref", Test_ ## N::get_tensor_const_ref);               \
+        m.def("get_tensor_map", Test_ ## N::get_tensor_map);                           \
         m.def("get_element", Test_ ## N::get_element);                                 \
-        m.def("add_element", (S(*)(RefType_ ## N, std::array<Eigen::Index, R>, S)) &Test_ ## N::add_element); \
-        m.def("add_element", (S(*)(TensorType_ ## N, std::array<Eigen::Index, R>, S)) &Test_ ## N::add_element); \
-        m.def("mul", Test_ ## N::mul);                                                 \
-        m.def("mul", Test_ ## N::mul_ref);                                             \
+        m.def("add_element", (void (*)(RefType_ ## N, std::array<Eigen::Index, R>, S)) &Test_ ## N::add_element); \
+        m.def("add_element", (void (*)(TensorType_ ## N, std::array<Eigen::Index, R>, S)) &Test_ ## N::add_element); \
+        m.def("mul", (RefType_ ## N (*)(RefType_ ## N, S)) &Test_ ## N::mul);    \
+        m.def("mul", (TensorType_ ## N (*)(TensorType_ ## N, S)) &Test_ ## N::mul); \
     }
 
 testmodule(eigen_tensor_3_f_r, float, 3, Eigen::RowMajor)
 testmodule(eigen_tensor_3_f_c, float, 3, Eigen::ColMajor)
 testmodule(eigen_tensor_4_f_r, float, 4, Eigen::RowMajor)
 testmodule(eigen_tensor_4_f_c, float, 4, Eigen::ColMajor)
-testmodule(eigen_tensor_5_f_r, float, 4, Eigen::RowMajor)
-testmodule(eigen_tensor_5_f_c, float, 4, Eigen::ColMajor)
+testmodule(eigen_tensor_5_f_r, float, 5, Eigen::RowMajor)
+testmodule(eigen_tensor_5_f_c, float, 5, Eigen::ColMajor)
 testmodule(eigen_tensor_3_d_r, double, 3, Eigen::RowMajor)
 testmodule(eigen_tensor_3_d_c, double, 3, Eigen::ColMajor)
 testmodule(eigen_tensor_3_i_r, int, 3, Eigen::RowMajor)

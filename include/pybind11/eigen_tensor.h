@@ -161,6 +161,7 @@ template <typename Type_> struct EigenTensorProps {
     static constexpr bool row_major = static_cast<int>(Type::Layout) == Eigen::RowMajor;
     /** Is the tensor writable? */
     static constexpr bool writable = !std::is_const<typename Type::CoeffReturnType>::value;
+
     /** Are we trying to avoid copying ? */
     static constexpr bool avoid_copy = is_eigen_tensor_map<Type>() || is_eigen_tensor_ref<Type>();
     /** Do we require numpy array to be writable?
@@ -194,20 +195,20 @@ template <typename Type_> struct EigenTensorProps {
     // the array is a vector, we attempt to fit it into either an Eigen 1xN or Nx1 vector
     // (preferring the latter if it will fit in either, i.e. for a fully dynamic matrix type).
     static bool needs_copy(const array &arr) {
-      if (!isinstance<array_t<Scalar>>(arr)) {
+      if (!isinstance<NumpyArrayType>(arr)) {
         return true;
       }
 
-      const auto dims = arr.ndim();
-      std::vector<long int> expected_strides{dims};
+      std::array<long int, rank> expected_strides;
       size_t cs = sizeof(Scalar);
       expected_strides[0] = cs;
-      for (long int i = 0; i < dims - 1; ++i) {
-        cs *= arr.shape(row_major ? dims - i - 1 : i);
+      for (long int i = 0; i < rank - 1; ++i) {
+        cs *= arr.shape(row_major ? rank - i - 1 : i);
         expected_strides[i + 1] = cs;
       }
-      for (long int i = 0; i < dims; ++i) {
-        if (arr.strides(i) != expected_strides[dims - i - 1]) {
+
+      for (long int i = 0; i < rank; ++i) {
+          if (arr.strides(i) != expected_strides[row_major ? rank - i - 1 : i]) {
           return true;
         }
       }
@@ -225,6 +226,15 @@ template <typename Type_> struct EigenTensorProps {
         _("]");
 };
 
+template<size_t rank>
+std::array<Eigen::Index, rank> get_dimensions(array a) {
+    std::array<Eigen::Index, rank> result{};
+    for (size_t i = 0; i < rank; ++i) {
+        result[i] = a.shape(i);
+    }
+    return result;
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 // Converting Eigen to numpy
 ////////////////////////////////////////////////////////////////////////////////
@@ -240,13 +250,12 @@ template <typename Type_> struct EigenTensorProps {
  *         given Eigen tensor.
  */
 template <typename props>
-handle tensor_array_cast(typename props::Type const &src,
+handle tensor_array_cast(typename props::Type &src,
                          handle base = handle(),
                          bool writable = props::writable) {
   typename props::NumpyArrayType a{src.dimensions(), src.data(), base};
 
   if (!writable) {
-      std::cout << "not writeable!" << std::endl;
     array_proxy(a.ptr())->flags &= !detail::npy_api::NPY_ARRAY_WRITEABLE_;
   }
 
@@ -283,6 +292,7 @@ template<typename Type>
 struct tensor_type_caster {
     using Scalar = typename Type::Scalar;
     using props = EigenTensorProps<Type>;
+    using MapType = typename props::EigenMapType;
 
     bool load(handle src, bool convert) {
         // If we're in no-convert mode, only load if given an array of the correct type
@@ -299,20 +309,17 @@ struct tensor_type_caster {
 
         // Allocate the new type, then build a numpy reference into it
         value = Type{};
-        std::array<typename Type::Index, props::rank> dims{};
-        for (size_t i = 0; i < props::rank; ++i) {
-            dims[i] = buf.shape(i);
-        }
+        auto dims = get_dimensions<props::rank>(buf);
         value.resize(dims);
 
-        auto ref = reinterpret_steal<array>(tensor_array_cast<props>(value));
-        int result = detail::npy_api::get().PyArray_CopyInto_(ref.ptr(), buf.ptr());
 
+        auto ref = reinterpret_steal<typename props::NumpyArrayType>(tensor_array_cast<props>(value, none()));
+
+        int result = detail::npy_api::get().PyArray_CopyInto_(ref.ptr(), buf.ptr());
         if (result < 0) { // Copy failed!
             PyErr_Clear();
             return false;
         }
-
         return true;
     }
 
@@ -331,7 +338,7 @@ private:
                 return tensor_array_cast<props>(*src);
             case return_value_policy::reference:
             case return_value_policy::automatic_reference:
-                return tensor_array_cast<props>(*src);
+                return tensor_array_cast<props>(*src, none());
             case return_value_policy::reference_internal:
                 return tensor_array_cast<props>(*src, parent);
             default:
@@ -383,15 +390,6 @@ private:
 
 
 
-template<size_t rank>
-std::array<Eigen::Index, rank> get_dimensions(array a) {
-    std::array<Eigen::Index, rank> result{};
-    for (size_t i = 0; i < rank; ++i) {
-        result[i] = a.shape(i);
-    }
-    return result;
-}
-
 template <typename Type>
 struct type_caster<Type, enable_if_t<is_eigen_tensor<Type>::value>>
     : public tensor_type_caster<Type> {};
@@ -404,32 +402,37 @@ struct type_caster<Type, enable_if_t<is_eigen_tensor_map<Type>::value || is_eige
     using props = typename Base::props;
     using MapType = typename props::EigenMapType;
     using Array = typename props::NumpyArrayType;
+    using Tensor = typename props::PlainObjectType;
+
 
 public:
 
     bool load(handle src, bool convert) {
 
-        // No need to carry on if array isn't even conform.
+        //No need to carry on if array isn't even conform.
         auto buf = array::ensure(src);
         if (!buf) return false;
         auto fits = props::conformable(buf);
         if (!fits) {
-            return false;
+           return false;
         }
-
 
         bool need_copy = props::needs_copy(buf);
         if (need_copy) {
-            if (!convert || props::avoid_copy) {
-                return false;
-            }
-            copy_or_ref = Array::ensure(src);
-            loader_life_support::add_patient(copy_or_ref);
+          if (!convert || props::avoid_copy) {
+              return false;
+          }
+          copy_or_ref = std::move(Array::ensure(src));
+          if (!copy_or_ref) {
+              return false;
+          }
+          loader_life_support::add_patient(copy_or_ref);
         } else {
-            copy_or_ref = Array::ensure(buf);
-            if (!copy_or_ref) {
-                return false;
-            }
+          Array aref = reinterpret_borrow<Array>(src);
+          if (!aref) {
+              return false;
+          }
+          copy_or_ref = aref;
         }
 
         map.reset(new MapType(copy_or_ref.mutable_data(), get_dimensions<props::rank>(copy_or_ref)));
@@ -438,14 +441,14 @@ public:
     }
 
     operator Type*() { return value.get(); }
-    operator Type&() { return *value.get(); }
-    operator Type&&() && { return std::move(*value); }
+    operator Type&() { return *value; }
+    template <typename _T> using cast_op_type = pybind11::detail::cast_op_type<_T>;
 
 private:
 
+    std::unique_ptr<MapType> map = nullptr;
+    std::unique_ptr<Type> value = nullptr;
     Array copy_or_ref;
-    std::unique_ptr<MapType> map;
-    std::unique_ptr<Type> value;
 
 };
 
